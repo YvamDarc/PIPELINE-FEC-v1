@@ -10,30 +10,20 @@ from utils.file_utils import (
 
 from utils.data_engineering_utils import (
     convertir_colonne_numerique,
-    convertir_colonne_date,
-    completer_dates_manquantes,
-    ajouter_variables_calendaires,
-    ajouter_lags,
-    ajouter_moyennes_mobiles,
-    ajouter_sommes_mobiles,
-    ajouter_ecarts,
-    ajouter_variations_pourcentage,
-    ajouter_cumuls,
-    ajouter_jours_feries_france,
-    ajouter_indicateurs_zero,
-    ajouter_valeurs_absolues
+    convertir_colonne_date
 )
 
 
-st.title("Data Engineering sur série temporelle")
+st.title("Data Engineering simple")
 
 st.write("""
-Cette page permet d'enrichir un tableau générique contenant une date et une valeur.
+Cette page enrichit un tableau existant sans supprimer ni regrouper les lignes.
 
-Elle peut être utilisée avec :
-- le solde journalier généré en page 1 ;
-- le tableau fusionné généré en page 2 ;
-- un fichier CSV / Excel importé manuellement.
+Elle permet principalement :
+- d'améliorer les colonnes dates ;
+- de choisir une colonne de valeur ;
+- d'ajouter des moyennes mobiles ;
+- d'ajouter des écarts.
 """)
 
 
@@ -52,7 +42,7 @@ def exporter_excel(df):
 
 def texte_vers_liste_entiers(texte):
     """
-    Transforme une saisie du type '1, 7, 30' en liste [1, 7, 30].
+    Transforme une saisie du type '7, 30, 90' en liste [7, 30, 90].
     """
     if not texte:
         return []
@@ -71,47 +61,50 @@ def texte_vers_liste_entiers(texte):
     return sorted(list(set(valeurs)))
 
 
-def colonnes_dates_probables(df):
+def detecter_colonnes_dates_probables(df):
     """
-    Propose en priorité les colonnes déjà datetime,
-    puis les colonnes dont le nom contient date/jour/période.
+    Propose d'abord les colonnes déjà au format date,
+    puis les colonnes contenant date, jour ou période dans leur nom.
     """
     colonnes = list(df.columns)
 
-    datetime_cols = [
+    colonnes_datetime = [
         col for col in colonnes
         if pd.api.types.is_datetime64_any_dtype(df[col])
     ]
 
-    nom_probable = [
+    colonnes_nom_date = [
         col for col in colonnes
         if any(mot in col.lower() for mot in ["date", "jour", "periode", "période"])
-        and col not in datetime_cols
+        and col not in colonnes_datetime
     ]
 
     autres = [
         col for col in colonnes
-        if col not in datetime_cols and col not in nom_probable
+        if col not in colonnes_datetime
+        and col not in colonnes_nom_date
     ]
 
-    return datetime_cols + nom_probable + autres
+    return colonnes_datetime + colonnes_nom_date + autres
 
 
-def colonnes_numeriques_probables(df):
+def detecter_colonnes_numeriques_probables(df):
     """
-    Détecte les colonnes qui peuvent probablement être converties en numérique.
+    Détecte les colonnes qui peuvent être converties en numérique.
     """
     colonnes_numeriques = []
 
     for col in df.columns:
-        serie_num = pd.to_numeric(
+        serie_num = (
             df[col]
+            .fillna("")
             .astype(str)
             .str.replace(" ", "", regex=False)
             .str.replace("\u202f", "", regex=False)
-            .str.replace(",", ".", regex=False),
-            errors="coerce"
+            .str.replace(",", ".", regex=False)
         )
+
+        serie_num = pd.to_numeric(serie_num, errors="coerce")
 
         if serie_num.notna().sum() > 0:
             colonnes_numeriques.append(col)
@@ -119,22 +112,82 @@ def colonnes_numeriques_probables(df):
     return colonnes_numeriques
 
 
-def trouver_index_colonne(colonnes, noms_prioritaires):
+def convertir_date_safe(df, colonne, format_date, dayfirst):
     """
-    Trouve l'index d'une colonne à partir de plusieurs noms possibles.
+    Convertit une colonne en date sans supprimer de ligne.
+    Ajoute :
+    - colonne_DateConvertie
+    - colonne_Date_OK
     """
-    for nom in noms_prioritaires:
-        if nom in colonnes:
-            return colonnes.index(nom)
+    df = df.copy()
 
-    return 0
+    nouvelle_colonne = f"{colonne}_DateConvertie"
+    colonne_controle = f"{colonne}_Date_OK"
+
+    df[nouvelle_colonne] = convertir_colonne_date(
+        df[colonne],
+        format_date=format_date,
+        dayfirst=dayfirst
+    )
+
+    df[colonne_controle] = df[nouvelle_colonne].notna().astype(int)
+
+    return df, nouvelle_colonne
+
+
+def ajouter_moyennes_mobiles_simples(df, colonne_date, colonne_valeur, fenetres):
+    """
+    Ajoute des moyennes mobiles sans regrouper les lignes.
+    Le calcul suit l'ordre de la colonne date principale.
+    """
+    df = df.copy()
+    df = df.sort_values(colonne_date).reset_index(drop=True)
+
+    for fenetre in fenetres:
+        df[f"{colonne_valeur}_MoyenneMobile_{fenetre}"] = (
+            df[colonne_valeur]
+            .rolling(window=fenetre, min_periods=1)
+            .mean()
+        )
+
+    return df
+
+
+def ajouter_ecarts_simples(df, colonne_date, colonne_valeur, decalages):
+    """
+    Ajoute des écarts simples par rapport aux lignes précédentes.
+    Exemple :
+    - écart 1 = valeur du jour - valeur de la ligne précédente
+    - écart 7 = valeur du jour - valeur 7 lignes avant
+    """
+    df = df.copy()
+    df = df.sort_values(colonne_date).reset_index(drop=True)
+
+    for decalage in decalages:
+        col_lag = f"{colonne_valeur}_Valeur_Precedente_{decalage}"
+        col_ecart = f"{colonne_valeur}_Ecart_{decalage}"
+
+        df[col_lag] = df[colonne_valeur].shift(decalage)
+        df[col_ecart] = df[colonne_valeur] - df[col_lag]
+
+    return df
+
+
+def format_dates_pour_export(df):
+    df_export = df.copy()
+
+    for col in df_export.columns:
+        if pd.api.types.is_datetime64_any_dtype(df_export[col]):
+            df_export[col] = df_export[col].dt.strftime("%d/%m/%Y")
+
+    return df_export
 
 
 # --------------------------------------------------
-# 1. Choix de la source de données
+# 1. Choix de la source
 # --------------------------------------------------
 
-st.header("1. Choix de la source de données")
+st.header("1. Choix de la source")
 
 sources_disponibles = []
 
@@ -147,36 +200,23 @@ if "df_merge" in st.session_state:
 sources_disponibles.append("Importer un nouveau fichier CSV / Excel")
 
 source = st.radio(
-    "Source du tableau à enrichir",
-    sources_disponibles,
-    horizontal=False
+    "Source du tableau",
+    sources_disponibles
 )
 
 if source == "Utiliser le solde journalier généré en page 1":
-
     df_original = st.session_state["df_solde_journalier"].copy()
     st.success("Solde journalier récupéré depuis la page 1.")
 
-    if "parametres_page_1" in st.session_state:
-        params = st.session_state["parametres_page_1"]
-
-        st.caption(
-            f"Paramètres page 1 : comptes {params.get('compte_debut')} à "
-            f"{params.get('compte_fin')} — sens {params.get('sens')} — "
-            f"{params.get('nombre_fec')} FEC."
-        )
-
 elif source == "Utiliser le tableau fusionné généré en page 2":
-
     df_original = st.session_state["df_merge"].copy()
     st.success("Tableau fusionné récupéré depuis la page 2.")
 
 else:
-
     fichier = st.file_uploader(
         "Importer un fichier CSV ou Excel",
         type=["csv", "xlsx", "xls"],
-        key="data_engineering_import"
+        key="data_engineering_import_simple"
     )
 
     if not fichier:
@@ -192,350 +232,255 @@ else:
     st.success("Fichier chargé.")
 
 
-st.write("Aperçu du tableau source :")
+st.subheader("Aperçu du tableau source")
+
+st.write(f"Nombre de lignes source : **{len(df_original)}**")
+st.write(f"Nombre de colonnes source : **{len(df_original.columns)}**")
+
 st.dataframe(
-    df_original.head(30),
+    df_original.head(50),
     use_container_width=True
 )
 
 
 # --------------------------------------------------
-# 2. Sélection des colonnes
+# 2. Amélioration des dates
 # --------------------------------------------------
 
-st.header("2. Sélection des colonnes principales")
+st.header("2. Amélioration des dates")
+
+st.write("""
+Sélectionne les colonnes qui doivent être reconnues comme des dates.
+Aucune ligne n'est supprimée : une colonne convertie est simplement ajoutée.
+""")
 
 colonnes = list(df_original.columns)
 
-if len(colonnes) == 0:
-    st.error("Le tableau ne contient aucune colonne.")
-    st.stop()
+colonnes_dates_suggerees = detecter_colonnes_dates_probables(df_original)
 
-colonnes_date_ordre = colonnes_dates_probables(df_original)
-colonnes_valeur_ordre = colonnes_numeriques_probables(df_original)
-
-if not colonnes_valeur_ordre:
-    colonnes_valeur_ordre = colonnes
-
-col1, col2 = st.columns(2)
-
-with col1:
-    colonne_date = st.selectbox(
-        "Colonne date",
-        colonnes_date_ordre,
-        index=trouver_index_colonne(
-            colonnes_date_ordre,
-            ["Date", "Date_Merge", "EcritureDate"]
-        )
-    )
-
-with col2:
-    colonne_valeur = st.selectbox(
-        "Colonne valeur à enrichir",
-        colonnes_valeur_ordre,
-        index=trouver_index_colonne(
-            colonnes_valeur_ordre,
-            ["SoldeJournalier", "Montant", "CA", "ChiffreAffaires"]
-        )
-    )
-
-
-# --------------------------------------------------
-# 3. Paramétrage date et valeur
-# --------------------------------------------------
-
-st.header("3. Paramétrage des formats")
+colonnes_dates_a_convertir = st.multiselect(
+    "Colonnes à convertir en date",
+    colonnes,
+    default=[
+        col for col in colonnes_dates_suggerees
+        if any(mot in col.lower() for mot in ["date", "jour", "periode", "période"])
+    ][:3]
+)
 
 formats = proposer_formats_date()
 
-col_format1, col_format2, col_format3 = st.columns(3)
+col_date_param1, col_date_param2 = st.columns(2)
 
-with col_format1:
+with col_date_param1:
     format_date = st.selectbox(
-        "Format de la date",
+        "Format de date",
         formats,
         index=0
     )
 
-with col_format2:
+with col_date_param2:
     dayfirst = st.checkbox(
-        "Dates françaises jour/mois/année",
-        value=True
-    )
-
-with col_format3:
-    completer_jours = st.checkbox(
-        "Compléter les dates manquantes",
-        value=True
+        "Interprétation française : jour/mois/année",
+        value=True,
+        help="À laisser coché pour les dates du type 13/01/2025."
     )
 
 
-df = df_original.copy()
+df_prepare = df_original.copy()
+colonnes_dates_converties = []
 
-df[colonne_date] = convertir_colonne_date(
-    df[colonne_date],
-    format_date=format_date,
-    dayfirst=dayfirst
-)
+for col in colonnes_dates_a_convertir:
+    df_prepare, nouvelle_colonne_date = convertir_date_safe(
+        df_prepare,
+        colonne=col,
+        format_date=format_date,
+        dayfirst=dayfirst
+    )
 
-df[colonne_valeur] = convertir_colonne_numerique(
-    df[colonne_valeur]
-)
-
-df = df.dropna(subset=[colonne_date])
-df = df.sort_values(colonne_date).reset_index(drop=True)
-
-if df.empty:
-    st.error("Aucune ligne exploitable après conversion de la colonne date.")
-    st.stop()
+    colonnes_dates_converties.append(nouvelle_colonne_date)
 
 
-# En cas de doublons sur la date, on propose de les regrouper.
-st.subheader("Gestion des doublons de date")
+if colonnes_dates_a_convertir:
+    st.subheader("Contrôle de conversion des dates")
 
-nb_doublons_date = df.duplicated(subset=[colonne_date]).sum()
+    controles = []
 
-st.write(f"Nombre de dates en doublon : **{nb_doublons_date}**")
+    for col in colonnes_dates_a_convertir:
+        col_ok = f"{col}_Date_OK"
+        col_convertie = f"{col}_DateConvertie"
 
-regrouper_par_date = st.checkbox(
-    "Regrouper les lignes par date avant enrichissement",
-    value=True,
-    help="Recommandé si plusieurs lignes existent pour un même jour. La colonne valeur est additionnée."
-)
-
-if regrouper_par_date:
-    autres_colonnes = [
-        col for col in df.columns
-        if col not in [colonne_date, colonne_valeur]
-    ]
-
-    df = (
-        df
-        .groupby(colonne_date, as_index=False)
-        .agg({
-            colonne_valeur: "sum",
-            **{col: "first" for col in autres_colonnes}
+        controles.append({
+            "Colonne source": col,
+            "Colonne date créée": col_convertie,
+            "Dates reconnues": int(df_prepare[col_ok].sum()),
+            "Dates non reconnues": int((df_prepare[col_ok] == 0).sum())
         })
-    )
 
-    df = df.sort_values(colonne_date).reset_index(drop=True)
-
-
-if completer_jours:
-    df = completer_dates_manquantes(
-        df=df,
-        colonne_date=colonne_date,
-        colonne_valeur=colonne_valeur,
-        frequence="D"
-    )
-
-    df = df.sort_values(colonne_date).reset_index(drop=True)
-
-
-st.subheader("Contrôle après préparation")
-
-c1, c2, c3, c4 = st.columns(4)
-
-with c1:
-    st.metric("Nombre de lignes", len(df))
-
-with c2:
-    st.metric("Date début", df[colonne_date].min().strftime("%d/%m/%Y"))
-
-with c3:
-    st.metric("Date fin", df[colonne_date].max().strftime("%d/%m/%Y"))
-
-with c4:
-    st.metric("Total valeur", f"{df[colonne_valeur].sum():,.2f}")
-
-
-with st.expander("Voir le tableau préparé avant enrichissement"):
     st.dataframe(
-        df.head(200),
+        pd.DataFrame(controles),
         use_container_width=True
     )
 
+    with st.expander("Voir les lignes avec dates non reconnues"):
+        masque_non_reconnues = pd.Series(False, index=df_prepare.index)
+
+        for col in colonnes_dates_a_convertir:
+            masque_non_reconnues = masque_non_reconnues | (
+                df_prepare[f"{col}_Date_OK"] == 0
+            )
+
+        st.dataframe(
+            df_prepare.loc[masque_non_reconnues].head(200),
+            use_container_width=True
+        )
+
+else:
+    st.info("Aucune colonne date sélectionnée pour conversion.")
+
 
 # --------------------------------------------------
-# 4. Choix des transformations
+# 3. Choix de la date principale et de la valeur
 # --------------------------------------------------
 
-st.header("4. Transformations à générer")
+st.header("3. Choix de la date principale et de la valeur")
 
-st.write("Coche uniquement les transformations que tu souhaites ajouter au tableau.")
+colonnes_dates_utilisables = [
+    col for col in df_prepare.columns
+    if pd.api.types.is_datetime64_any_dtype(df_prepare[col])
+]
+
+if not colonnes_dates_utilisables:
+    st.warning(
+        "Aucune colonne date exploitable n'a été détectée. "
+        "Sélectionne au moins une colonne date à convertir dans l'étape précédente."
+    )
+    st.stop()
+
+colonnes_numeriques_probables = detecter_colonnes_numeriques_probables(df_prepare)
+
+if not colonnes_numeriques_probables:
+    st.warning("Aucune colonne numérique exploitable détectée.")
+    st.stop()
+
+col_principal1, col_principal2 = st.columns(2)
+
+with col_principal1:
+    colonne_date_principale = st.selectbox(
+        "Date principale pour trier et calculer",
+        colonnes_dates_utilisables,
+        index=0
+    )
+
+with col_principal2:
+    colonne_valeur = st.selectbox(
+        "Colonne numérique à enrichir",
+        colonnes_numeriques_probables,
+        index=colonnes_numeriques_probables.index("SoldeJournalier")
+        if "SoldeJournalier" in colonnes_numeriques_probables
+        else 0
+    )
+
+
+df_prepare[colonne_valeur] = convertir_colonne_numerique(
+    df_prepare[colonne_valeur]
+)
+
+# On ne supprime pas les lignes.
+# On trie seulement les lignes qui ont une date principale.
+# Les lignes sans date principale restent à la fin.
+
+df_prepare["_Date_Principale_NA"] = df_prepare[colonne_date_principale].isna()
+
+df_prepare = (
+    df_prepare
+    .sort_values(
+        by=["_Date_Principale_NA", colonne_date_principale],
+        ascending=[True, True]
+    )
+    .drop(columns=["_Date_Principale_NA"])
+    .reset_index(drop=True)
+)
+
+st.subheader("Aperçu après préparation simple")
+
+st.write(f"Nombre de lignes conservées : **{len(df_prepare)}**")
+
+st.dataframe(
+    df_prepare.head(100),
+    use_container_width=True
+)
+
+
+# --------------------------------------------------
+# 4. Transformations simples
+# --------------------------------------------------
+
+st.header("4. Transformations simples")
+
+st.write("""
+Les calculs sont faits dans l'ordre de la date principale.
+Ils ne regroupent pas les lignes et ne complètent pas les jours manquants.
+""")
 
 col_transfo1, col_transfo2 = st.columns(2)
 
 with col_transfo1:
-    ajouter_calendrier = st.checkbox(
-        "Variables calendaires",
+    generer_moyennes = st.checkbox(
+        "Générer des moyennes mobiles",
         value=True
     )
 
-    ajouter_jours_feries = st.checkbox(
-        "Jours fériés France",
-        value=True
-    )
-
-    ajouter_zero = st.checkbox(
-        "Indicateurs zéro / positif / négatif",
-        value=True
-    )
-
-    ajouter_abs = st.checkbox(
-        "Valeur absolue",
-        value=False
-    )
-
-    ajouter_cumul = st.checkbox(
-        "Cumuls mensuel et annuel",
-        value=True
-    )
-
-with col_transfo2:
-    ajouter_lag = st.checkbox(
-        "Variables de retard, lags",
-        value=True
-    )
-
-    ajouter_mm = st.checkbox(
-        "Moyennes mobiles",
-        value=True
-    )
-
-    ajouter_somme_mobile = st.checkbox(
-        "Sommes mobiles",
-        value=False
-    )
-
-    ajouter_ecart = st.checkbox(
-        "Écarts avec périodes précédentes",
-        value=True
-    )
-
-    ajouter_var_pct = st.checkbox(
-        "Variations en %",
-        value=False
-    )
-
-
-st.subheader("Paramètres avancés")
-
-col_param1, col_param2, col_param3 = st.columns(3)
-
-with col_param1:
-    lags_texte = st.text_input(
-        "Lags à générer, en jours",
-        value="1, 7, 30, 365",
-        help="Exemple : 1, 7, 30, 365"
-    )
-
-with col_param2:
-    moyennes_texte = st.text_input(
-        "Fenêtres de moyennes mobiles",
+    fenetres_moyennes_txt = st.text_input(
+        "Fenêtres moyennes mobiles",
         value="7, 30, 90",
         help="Exemple : 7, 30, 90"
     )
 
-with col_param3:
-    sommes_texte = st.text_input(
-        "Fenêtres de sommes mobiles",
-        value="7, 30",
-        help="Exemple : 7, 30"
+with col_transfo2:
+    generer_ecarts = st.checkbox(
+        "Générer des écarts",
+        value=True
     )
 
-lags = texte_vers_liste_entiers(lags_texte)
-fenetres_moyennes = texte_vers_liste_entiers(moyennes_texte)
-fenetres_sommes = texte_vers_liste_entiers(sommes_texte)
-
-
-# --------------------------------------------------
-# 5. Application des transformations
-# --------------------------------------------------
-
-st.header("5. Résultat enrichi")
-
-df_enrichi = df.copy()
-
-if ajouter_calendrier:
-    df_enrichi = ajouter_variables_calendaires(
-        df_enrichi,
-        colonne_date=colonne_date
+    decalages_ecarts_txt = st.text_input(
+        "Décalages pour les écarts",
+        value="1, 7, 30",
+        help="Exemple : 1, 7, 30"
     )
 
-if ajouter_jours_feries:
-    df_enrichi = ajouter_jours_feries_france(
-        df_enrichi,
-        colonne_date=colonne_date
-    )
 
-if ajouter_zero:
-    df_enrichi = ajouter_indicateurs_zero(
-        df_enrichi,
-        colonne_valeur=colonne_valeur
-    )
+fenetres_moyennes = texte_vers_liste_entiers(fenetres_moyennes_txt)
+decalages_ecarts = texte_vers_liste_entiers(decalages_ecarts_txt)
 
-if ajouter_abs:
-    df_enrichi = ajouter_valeurs_absolues(
-        df_enrichi,
-        colonne_valeur=colonne_valeur
-    )
 
-if ajouter_lag and lags:
-    df_enrichi = ajouter_lags(
-        df_enrichi,
-        colonne_valeur=colonne_valeur,
-        lags=lags
-    )
+df_enrichi = df_prepare.copy()
 
-if ajouter_mm and fenetres_moyennes:
-    df_enrichi = ajouter_moyennes_mobiles(
+if generer_moyennes and fenetres_moyennes:
+    df_enrichi = ajouter_moyennes_mobiles_simples(
         df_enrichi,
+        colonne_date=colonne_date_principale,
         colonne_valeur=colonne_valeur,
         fenetres=fenetres_moyennes
     )
 
-if ajouter_somme_mobile and fenetres_sommes:
-    df_enrichi = ajouter_sommes_mobiles(
+if generer_ecarts and decalages_ecarts:
+    df_enrichi = ajouter_ecarts_simples(
         df_enrichi,
+        colonne_date=colonne_date_principale,
         colonne_valeur=colonne_valeur,
-        fenetres=fenetres_sommes
-    )
-
-if ajouter_ecart and lags:
-    df_enrichi = ajouter_ecarts(
-        df_enrichi,
-        colonne_valeur=colonne_valeur,
-        lags=lags
-    )
-
-if ajouter_var_pct and lags:
-    df_enrichi = ajouter_variations_pourcentage(
-        df_enrichi,
-        colonne_valeur=colonne_valeur,
-        lags=lags
-    )
-
-if ajouter_cumul:
-    df_enrichi = ajouter_cumuls(
-        df_enrichi,
-        colonne_date=colonne_date,
-        colonne_valeur=colonne_valeur
+        decalages=decalages_ecarts
     )
 
 
-# Stockage pour réutilisation future
+# Stockage session
 st.session_state["df_data_engineering"] = df_enrichi.copy()
 
-st.success("Le tableau enrichi est stocké en mémoire dans la session.")
+st.success("Tableau enrichi généré et stocké en mémoire.")
 
-col_res1, col_res2 = st.columns(2)
+st.subheader("Résultat enrichi")
 
-with col_res1:
-    st.write(f"Nombre de colonnes initiales : **{len(df.columns)}**")
-
-with col_res2:
-    st.write(f"Nombre de colonnes après enrichissement : **{len(df_enrichi.columns)}**")
+st.write(f"Nombre de lignes : **{len(df_enrichi)}**")
+st.write(f"Nombre de colonnes : **{len(df_enrichi.columns)}**")
 
 st.dataframe(
     df_enrichi,
@@ -544,10 +489,10 @@ st.dataframe(
 
 
 # --------------------------------------------------
-# 6. Visualisation
+# 5. Visualisation simple
 # --------------------------------------------------
 
-st.header("6. Visualisation")
+st.header("5. Visualisation")
 
 colonnes_numeriques = [
     col for col in df_enrichi.columns
@@ -555,214 +500,73 @@ colonnes_numeriques = [
 ]
 
 if colonnes_numeriques:
-
-    onglet_ligne, onglet_barres, onglet_correlation = st.tabs(
-        [
-            "Courbe temporelle",
-            "Barres par période",
-            "Corrélation"
-        ]
+    colonne_y = st.selectbox(
+        "Variable à afficher",
+        colonnes_numeriques,
+        index=colonnes_numeriques.index(colonne_valeur)
+        if colonne_valeur in colonnes_numeriques
+        else 0
     )
 
-    with onglet_ligne:
-        col_graph1, col_graph2 = st.columns(2)
+    df_graph = df_enrichi.dropna(subset=[colonne_date_principale]).copy()
 
-        with col_graph1:
-            colonne_y = st.selectbox(
-                "Variable à visualiser",
-                colonnes_numeriques,
-                index=colonnes_numeriques.index(colonne_valeur)
-                if colonne_valeur in colonnes_numeriques
-                else 0,
-                key="de_ligne_y"
-            )
+    fig = px.line(
+        df_graph,
+        x=colonne_date_principale,
+        y=colonne_y,
+        title=f"{colonne_y} dans le temps"
+    )
 
-        with col_graph2:
-            afficher_points = st.checkbox(
-                "Afficher les points",
-                value=False,
-                key="de_points"
-            )
+    fig.update_layout(
+        xaxis_title="Date",
+        yaxis_title=colonne_y,
+        hovermode="x unified"
+    )
 
-        fig = px.line(
-            df_enrichi,
-            x=colonne_date,
-            y=colonne_y,
-            title=f"{colonne_y} dans le temps",
-            markers=afficher_points
-        )
+    fig.update_xaxes(
+        rangeslider_visible=True
+    )
 
-        fig.update_layout(
-            xaxis_title="Date",
-            yaxis_title=colonne_y,
-            hovermode="x unified"
-        )
-
-        fig.update_xaxes(rangeslider_visible=True)
-
-        st.plotly_chart(
-            fig,
-            use_container_width=True
-        )
-
-    with onglet_barres:
-        col_bar1, col_bar2 = st.columns(2)
-
-        with col_bar1:
-            colonne_bar = st.selectbox(
-                "Variable à regrouper",
-                colonnes_numeriques,
-                index=colonnes_numeriques.index(colonne_valeur)
-                if colonne_valeur in colonnes_numeriques
-                else 0,
-                key="de_bar_y"
-            )
-
-        with col_bar2:
-            periode_bar = st.selectbox(
-                "Période",
-                ["Jour", "Mois", "Année"],
-                index=1,
-                key="de_bar_periode"
-            )
-
-        df_bar = df_enrichi.copy()
-
-        if periode_bar == "Jour":
-            df_bar["_periode"] = df_bar[colonne_date].dt.strftime("%d/%m/%Y")
-        elif periode_bar == "Mois":
-            df_bar["_periode"] = df_bar[colonne_date].dt.to_period("M").astype(str)
-        else:
-            df_bar["_periode"] = df_bar[colonne_date].dt.year.astype(str)
-
-        df_bar_group = (
-            df_bar
-            .groupby("_periode", as_index=False)[colonne_bar]
-            .sum()
-        )
-
-        fig_bar = px.bar(
-            df_bar_group,
-            x="_periode",
-            y=colonne_bar,
-            title=f"{colonne_bar} par {periode_bar.lower()}"
-        )
-
-        fig_bar.update_layout(
-            xaxis_title=periode_bar,
-            yaxis_title=colonne_bar
-        )
-
-        st.plotly_chart(
-            fig_bar,
-            use_container_width=True
-        )
-
-    with onglet_correlation:
-        st.write("Analyse rapide entre deux variables numériques.")
-
-        if len(colonnes_numeriques) >= 2:
-            col_corr1, col_corr2 = st.columns(2)
-
-            with col_corr1:
-                colonne_x = st.selectbox(
-                    "Variable X",
-                    colonnes_numeriques,
-                    index=0,
-                    key="de_corr_x"
-                )
-
-            with col_corr2:
-                colonne_y_corr = st.selectbox(
-                    "Variable Y",
-                    colonnes_numeriques,
-                    index=1,
-                    key="de_corr_y"
-                )
-
-            df_corr = df_enrichi[[colonne_x, colonne_y_corr]].dropna()
-
-            if not df_corr.empty:
-                correlation = df_corr[colonne_x].corr(df_corr[colonne_y_corr])
-
-                st.metric(
-                    "Corrélation",
-                    f"{correlation:.4f}"
-                )
-
-                fig_corr = px.scatter(
-                    df_corr,
-                    x=colonne_x,
-                    y=colonne_y_corr,
-                    title=f"{colonne_y_corr} en fonction de {colonne_x}"
-                )
-
-                fig_corr.update_layout(
-                    xaxis_title=colonne_x,
-                    yaxis_title=colonne_y_corr
-                )
-
-                st.plotly_chart(
-                    fig_corr,
-                    use_container_width=True
-                )
-            else:
-                st.info("Pas assez de données pour calculer une corrélation.")
-        else:
-            st.info("Il faut au moins deux colonnes numériques pour une corrélation.")
-
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
 else:
-    st.info("Aucune colonne numérique disponible pour la visualisation.")
+    st.info("Aucune colonne numérique disponible pour le graphique.")
 
 
 # --------------------------------------------------
-# 7. Analyse rapide des colonnes générées
+# 6. Contrôles
 # --------------------------------------------------
 
-st.header("7. Contrôles")
+st.header("6. Contrôles")
 
-with st.expander("Voir la liste des colonnes générées"):
-    colonnes_generees = pd.DataFrame({
-        "Colonnes": df_enrichi.columns
-    })
-
+with st.expander("Voir les colonnes générées"):
     st.dataframe(
-        colonnes_generees,
+        pd.DataFrame({"Colonnes": df_enrichi.columns}),
         use_container_width=True
     )
 
+with st.expander("Voir les lignes sans date principale reconnue"):
+    lignes_sans_date = df_enrichi[
+        df_enrichi[colonne_date_principale].isna()
+    ]
 
-with st.expander("Voir les lignes avec valeurs manquantes"):
-    lignes_na = df_enrichi[df_enrichi.isna().any(axis=1)]
-
-    st.write(
-        f"Nombre de lignes avec au moins une valeur manquante : **{len(lignes_na)}**"
-    )
+    st.write(f"Nombre de lignes sans date principale : **{len(lignes_sans_date)}**")
 
     st.dataframe(
-        lignes_na.head(100),
-        use_container_width=True
-    )
-
-
-with st.expander("Statistiques descriptives"):
-    st.dataframe(
-        df_enrichi.describe(include="all").transpose(),
+        lignes_sans_date.head(200),
         use_container_width=True
     )
 
 
 # --------------------------------------------------
-# 8. Exports
+# 7. Exports
 # --------------------------------------------------
 
-st.header("8. Exports")
+st.header("7. Exports")
 
-df_export = df_enrichi.copy()
-
-for col in df_export.columns:
-    if pd.api.types.is_datetime64_any_dtype(df_export[col]):
-        df_export[col] = df_export[col].dt.strftime("%d/%m/%Y")
+df_export = format_dates_pour_export(df_enrichi)
 
 csv = df_export.to_csv(
     index=False,
@@ -773,7 +577,7 @@ csv = df_export.to_csv(
 st.download_button(
     label="Télécharger le tableau enrichi en CSV",
     data=csv,
-    file_name="tableau_data_engineering.csv",
+    file_name="tableau_data_engineering_simple.csv",
     mime="text/csv"
 )
 
@@ -782,6 +586,6 @@ excel = exporter_excel(df_export)
 st.download_button(
     label="Télécharger le tableau enrichi en Excel",
     data=excel,
-    file_name="tableau_data_engineering.xlsx",
+    file_name="tableau_data_engineering_simple.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
