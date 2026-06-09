@@ -1,5 +1,7 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
+import matplotlib.pyplot as plt
 from io import BytesIO
 
 
@@ -227,15 +229,6 @@ calendrier = pd.concat(calendriers, ignore_index=True)
 # --------------------------------------------------
 # Solde journalier
 # --------------------------------------------------
-# Ici on additionne uniquement les écritures du même jour
-# dans la plage de comptes sélectionnée.
-#
-# Exemple :
-# 7071000 le 03/01/2025 : 1 000
-# 7072000 le 03/01/2025 : 2 000
-# Résultat du 03/01/2025 : 3 000
-#
-# Le 04/01/2025 ne reprend pas le 03/01/2025.
 
 soldes_journaliers = (
     df_filtre
@@ -255,27 +248,133 @@ resultat = calendrier.merge(
 
 resultat["SoldeJournalier"] = resultat["SoldeJournalier"].fillna(0)
 
-resultat_final = resultat[["Date", "SoldeJournalier"]].copy()
+resultat["Annee"] = resultat["Date"].dt.year
+resultat["Mois"] = resultat["Date"].dt.to_period("M").astype(str)
 
-resultat_final["Date"] = resultat_final["Date"].dt.strftime("%d/%m/%Y")
+resultat_final = resultat[["Date", "SoldeJournalier"]].copy()
+resultat_final_affichage = resultat_final.copy()
+resultat_final_affichage["Date"] = resultat_final_affichage["Date"].dt.strftime("%d/%m/%Y")
 
 
 # --------------------------------------------------
-# Affichage
+# Affichage du résultat
 # --------------------------------------------------
 
 st.subheader("Résultat")
 
-st.write(f"Nombre de jours générés : **{len(resultat_final)}**")
+col_info1, col_info2, col_info3 = st.columns(3)
+
+with col_info1:
+    st.metric("Nombre de jours générés", len(resultat_final))
+
+with col_info2:
+    st.metric("Solde total de la période", f"{resultat_final['SoldeJournalier'].sum():,.2f}")
+
+with col_info3:
+    st.metric("Nombre d'années", len(annees))
 
 st.write(
     f"Plage sélectionnée : **{compte_debut} à {compte_fin}**"
 )
 
 st.dataframe(
-    resultat_final,
+    resultat_final_affichage,
     use_container_width=True
 )
+
+
+# --------------------------------------------------
+# Graphique interactif
+# --------------------------------------------------
+
+st.subheader("Visualisation graphique")
+
+type_graphique = st.radio(
+    "Type de graphique",
+    [
+        "Solde journalier",
+        "Solde mensuel",
+        "Cumul annuel pour visualisation"
+    ],
+    horizontal=True
+)
+
+if type_graphique == "Solde journalier":
+    df_graph = resultat.copy()
+    y_col = "SoldeJournalier"
+    titre = "Solde journalier de la plage de comptes"
+
+elif type_graphique == "Solde mensuel":
+    df_graph = (
+        resultat
+        .groupby("Mois", as_index=False)["SoldeJournalier"]
+        .sum()
+    )
+    df_graph["Date"] = pd.to_datetime(df_graph["Mois"] + "-01")
+    y_col = "SoldeJournalier"
+    titre = "Solde mensuel de la plage de comptes"
+
+else:
+    df_graph = resultat.copy()
+    df_graph["CumulAnnuel"] = (
+        df_graph
+        .groupby("Annee")["SoldeJournalier"]
+        .cumsum()
+    )
+    y_col = "CumulAnnuel"
+    titre = "Cumul annuel de la plage de comptes, remis à zéro chaque année"
+
+
+fig = px.line(
+    df_graph,
+    x="Date",
+    y=y_col,
+    title=titre,
+    markers=False
+)
+
+fig.update_layout(
+    xaxis_title="Date",
+    yaxis_title="Montant",
+    hovermode="x unified"
+)
+
+fig.update_xaxes(
+    rangeslider_visible=True
+)
+
+st.plotly_chart(
+    fig,
+    use_container_width=True
+)
+
+st.caption(
+    "Le graphique Plotly permet de zoomer, dézoomer, sélectionner une période et afficher les valeurs au survol."
+)
+
+
+# --------------------------------------------------
+# Option matplotlib / pyplot
+# --------------------------------------------------
+
+with st.expander("Voir aussi le graphique Pyplot simple"):
+    st.write(
+        "Ce graphique est statique. Pour zoomer, utilise plutôt le graphique interactif juste au-dessus."
+    )
+
+    fig_matplotlib, ax = plt.subplots(figsize=(14, 5))
+
+    if type_graphique == "Solde mensuel":
+        ax.plot(df_graph["Date"], df_graph[y_col])
+    else:
+        ax.plot(df_graph["Date"], df_graph[y_col])
+
+    ax.set_title(titre)
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Montant")
+    ax.grid(True)
+
+    st.pyplot(fig_matplotlib)
 
 
 # --------------------------------------------------
@@ -321,7 +420,7 @@ with st.expander("Voir le détail journalier avec les jours à zéro"):
 
 st.subheader("Exports")
 
-csv = resultat_final.to_csv(
+csv = resultat_final_affichage.to_csv(
     index=False,
     sep=";",
     decimal=","
@@ -334,7 +433,7 @@ st.download_button(
     mime="text/csv"
 )
 
-excel = exporter_excel(resultat_final)
+excel = exporter_excel(resultat_final_affichage)
 
 st.download_button(
     label="Télécharger en Excel",
