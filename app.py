@@ -4,23 +4,24 @@ from io import BytesIO
 
 
 st.set_page_config(
-    page_title="Cumul journalier FEC",
+    page_title="Solde journalier FEC",
     layout="wide"
 )
 
-st.title("Cumul journalier par plage de comptes depuis plusieurs FEC")
+st.title("Solde journalier par plage de comptes depuis plusieurs FEC")
 
 
-# -----------------------------
-# Fonctions utilitaires
-# -----------------------------
+# --------------------------------------------------
+# Fonctions
+# --------------------------------------------------
 
-def lire_fec(uploaded_file: BytesIO) -> pd.DataFrame:
+def lire_fec(uploaded_file):
     """
-    Lecture robuste d'un fichier FEC.
-    Le FEC est généralement séparé par tabulation.
+    Lecture d'un FEC.
+    Le FEC est normalement séparé par tabulation.
     """
     try:
+        uploaded_file.seek(0)
         df = pd.read_csv(
             uploaded_file,
             sep="\t",
@@ -40,10 +41,10 @@ def lire_fec(uploaded_file: BytesIO) -> pd.DataFrame:
     return df
 
 
-def convertir_montant(serie: pd.Series) -> pd.Series:
+def convertir_montant(serie):
     """
-    Convertit les montants FEC en nombre.
-    Gère les virgules décimales françaises.
+    Convertit les montants du FEC en nombres.
+    Gère les virgules françaises.
     """
     return (
         serie.fillna("0")
@@ -55,12 +56,13 @@ def convertir_montant(serie: pd.Series) -> pd.Series:
     )
 
 
-def preparer_fec(df: pd.DataFrame, nom_fichier: str) -> pd.DataFrame:
+def preparer_fec(df, nom_fichier):
     """
-    Prépare un FEC :
-    - vérifie les colonnes utiles
-    - convertit date, compte, débit, crédit
-    - calcule le montant net débit - crédit
+    Préparation du FEC :
+    - contrôle des colonnes utiles
+    - conversion de la date
+    - conversion des montants
+    - calcul débit - crédit et crédit - débit
     """
 
     colonnes_obligatoires = [
@@ -71,7 +73,8 @@ def preparer_fec(df: pd.DataFrame, nom_fichier: str) -> pd.DataFrame:
     ]
 
     colonnes_manquantes = [
-        col for col in colonnes_obligatoires if col not in df.columns
+        col for col in colonnes_obligatoires
+        if col not in df.columns
     ]
 
     if colonnes_manquantes:
@@ -92,8 +95,8 @@ def preparer_fec(df: pd.DataFrame, nom_fichier: str) -> pd.DataFrame:
     df["Debit"] = convertir_montant(df["Debit"])
     df["Credit"] = convertir_montant(df["Credit"])
 
-    df["MontantDebitCredit"] = df["Debit"] - df["Credit"]
-    df["MontantCreditDebit"] = df["Credit"] - df["Debit"]
+    df["DebitMoinsCredit"] = df["Debit"] - df["Credit"]
+    df["CreditMoinsDebit"] = df["Credit"] - df["Debit"]
 
     df["Fichier"] = nom_fichier
 
@@ -102,18 +105,18 @@ def preparer_fec(df: pd.DataFrame, nom_fichier: str) -> pd.DataFrame:
     return df
 
 
-def exporter_excel(df: pd.DataFrame) -> bytes:
+def exporter_excel(df):
     output = BytesIO()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Cumul journalier")
+        df.to_excel(writer, index=False, sheet_name="Solde journalier")
 
     return output.getvalue()
 
 
-# -----------------------------
-# Import des FEC
-# -----------------------------
+# --------------------------------------------------
+# Import fichiers
+# --------------------------------------------------
 
 uploaded_files = st.file_uploader(
     "Importer jusqu'à 6 fichiers FEC",
@@ -121,178 +124,221 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
-if uploaded_files:
+if not uploaded_files:
+    st.info("Importe un ou plusieurs fichiers FEC pour commencer.")
+    st.stop()
 
-    if len(uploaded_files) > 6:
-        st.error("Tu peux importer 6 FEC maximum.")
+if len(uploaded_files) > 6:
+    st.error("Tu peux importer 6 FEC maximum.")
+    st.stop()
+
+
+# --------------------------------------------------
+# Lecture des FEC
+# --------------------------------------------------
+
+fecs = []
+
+for fichier in uploaded_files:
+    try:
+        df_brut = lire_fec(fichier)
+        df_prepare = preparer_fec(df_brut, fichier.name)
+        fecs.append(df_prepare)
+    except Exception as e:
+        st.error(f"Erreur sur le fichier {fichier.name} : {e}")
         st.stop()
 
-    fecs = []
+df = pd.concat(fecs, ignore_index=True)
 
-    for fichier in uploaded_files:
-        try:
-            df_brut = lire_fec(fichier)
-            df_pret = preparer_fec(df_brut, fichier.name)
-            fecs.append(df_pret)
-        except Exception as e:
-            st.error(f"Erreur sur le fichier {fichier.name} : {e}")
-            st.stop()
+st.success(f"{len(uploaded_files)} fichier(s) FEC chargé(s).")
 
-    df = pd.concat(fecs, ignore_index=True)
 
-    st.success(f"{len(uploaded_files)} fichier(s) FEC chargé(s).")
+# --------------------------------------------------
+# Paramètres utilisateur
+# --------------------------------------------------
 
-    # -----------------------------
-    # Paramètres utilisateur
-    # -----------------------------
+st.subheader("Paramètres de sélection")
 
-    st.subheader("Paramètres de sélection")
+col1, col2, col3 = st.columns(3)
 
-    col1, col2, col3 = st.columns(3)
+with col1:
+    compte_debut = st.text_input(
+        "Compte de début",
+        value="7000000"
+    ).strip()
 
-    with col1:
-        compte_debut = st.text_input(
-            "Compte de début",
-            value="600000000"
-        )
+with col2:
+    compte_fin = st.text_input(
+        "Compte de fin",
+        value="70999999"
+    ).strip()
 
-    with col2:
-        compte_fin = st.text_input(
-            "Compte de fin",
-            value="699999999"
-        )
-
-    with col3:
-        sens = st.selectbox(
-            "Sens du montant",
-            [
-                "Débit - Crédit",
-                "Crédit - Débit"
-            ]
-        )
-
-    montant_col = (
-        "MontantDebitCredit"
-        if sens == "Débit - Crédit"
-        else "MontantCreditDebit"
+with col3:
+    sens = st.selectbox(
+        "Sens du solde",
+        [
+            "Débit - Crédit",
+            "Crédit - Débit"
+        ]
     )
 
-    # -----------------------------
-    # Filtre par plage de comptes
-    # -----------------------------
+colonne_montant = (
+    "DebitMoinsCredit"
+    if sens == "Débit - Crédit"
+    else "CreditMoinsDebit"
+)
 
-    df_filtre = df[
-        (df["CompteNum"] >= compte_debut)
-        & (df["CompteNum"] <= compte_fin)
+
+# --------------------------------------------------
+# Filtre par plage de comptes
+# --------------------------------------------------
+
+df_filtre = df[
+    (df["CompteNum"] >= compte_debut)
+    & (df["CompteNum"] <= compte_fin)
+].copy()
+
+if df_filtre.empty:
+    st.warning("Aucune écriture trouvée sur cette plage de comptes.")
+    st.stop()
+
+
+# --------------------------------------------------
+# Création du calendrier complet
+# --------------------------------------------------
+
+annees = sorted(df["EcritureDate"].dt.year.dropna().unique())
+
+calendriers = []
+
+for annee in annees:
+    debut = pd.Timestamp(year=int(annee), month=1, day=1)
+    fin = pd.Timestamp(year=int(annee), month=12, day=31)
+
+    calendrier_annee = pd.DataFrame({
+        "Date": pd.date_range(debut, fin, freq="D")
+    })
+
+    calendriers.append(calendrier_annee)
+
+calendrier = pd.concat(calendriers, ignore_index=True)
+
+
+# --------------------------------------------------
+# Solde journalier
+# --------------------------------------------------
+# Ici on additionne uniquement les écritures du même jour
+# dans la plage de comptes sélectionnée.
+#
+# Exemple :
+# 7071000 le 03/01/2025 : 1 000
+# 7072000 le 03/01/2025 : 2 000
+# Résultat du 03/01/2025 : 3 000
+#
+# Le 04/01/2025 ne reprend pas le 03/01/2025.
+
+soldes_journaliers = (
+    df_filtre
+    .groupby("EcritureDate", as_index=False)[colonne_montant]
+    .sum()
+    .rename(columns={
+        "EcritureDate": "Date",
+        colonne_montant: "SoldeJournalier"
+    })
+)
+
+resultat = calendrier.merge(
+    soldes_journaliers,
+    on="Date",
+    how="left"
+)
+
+resultat["SoldeJournalier"] = resultat["SoldeJournalier"].fillna(0)
+
+resultat_final = resultat[["Date", "SoldeJournalier"]].copy()
+
+resultat_final["Date"] = resultat_final["Date"].dt.strftime("%d/%m/%Y")
+
+
+# --------------------------------------------------
+# Affichage
+# --------------------------------------------------
+
+st.subheader("Résultat")
+
+st.write(f"Nombre de jours générés : **{len(resultat_final)}**")
+
+st.write(
+    f"Plage sélectionnée : **{compte_debut} à {compte_fin}**"
+)
+
+st.dataframe(
+    resultat_final,
+    use_container_width=True
+)
+
+
+# --------------------------------------------------
+# Contrôle / détail des écritures
+# --------------------------------------------------
+
+with st.expander("Voir le détail des écritures prises en compte"):
+    detail_ecritures = df_filtre[
+        [
+            "EcritureDate",
+            "CompteNum",
+            "Debit",
+            "Credit",
+            "DebitMoinsCredit",
+            "CreditMoinsDebit",
+            "Fichier"
+        ]
     ].copy()
 
-    if df_filtre.empty:
-        st.warning("Aucune écriture trouvée sur cette plage de comptes.")
-        st.stop()
-
-    # -----------------------------
-    # Détermination des années complètes
-    # -----------------------------
-
-    annees = sorted(df["EcritureDate"].dt.year.dropna().unique())
-
-    calendrier = []
-
-    for annee in annees:
-        debut = pd.Timestamp(year=int(annee), month=1, day=1)
-        fin = pd.Timestamp(year=int(annee), month=12, day=31)
-
-        calendrier_annee = pd.DataFrame({
-            "Date": pd.date_range(debut, fin, freq="D")
-        })
-
-        calendrier.append(calendrier_annee)
-
-    calendrier = pd.concat(calendrier, ignore_index=True)
-
-    # -----------------------------
-    # Cumul journalier
-    # -----------------------------
-
-    mouvements_journaliers = (
-        df_filtre
-        .groupby("EcritureDate", as_index=False)[montant_col]
-        .sum()
-        .rename(columns={
-            "EcritureDate": "Date",
-            montant_col: "MontantJour"
-        })
-    )
-
-    resultat = calendrier.merge(
-        mouvements_journaliers,
-        on="Date",
-        how="left"
-    )
-
-    resultat["MontantJour"] = resultat["MontantJour"].fillna(0)
-
-    resultat["MontantCumule"] = resultat["MontantJour"].cumsum()
-
-    resultat_final = resultat[["Date", "MontantCumule"]].copy()
-
-    resultat_final["Date"] = resultat_final["Date"].dt.strftime("%d/%m/%Y")
-
-    # -----------------------------
-    # Affichage
-    # -----------------------------
-
-    st.subheader("Résultat")
-
-    st.write(
-        f"Nombre de jours générés : **{len(resultat_final)}**"
+    detail_ecritures["EcritureDate"] = (
+        detail_ecritures["EcritureDate"].dt.strftime("%d/%m/%Y")
     )
 
     st.dataframe(
-        resultat_final,
+        detail_ecritures,
         use_container_width=True
     )
 
-    # -----------------------------
-    # Détail optionnel
-    # -----------------------------
 
-    with st.expander("Voir le détail avec le montant du jour"):
-        detail = resultat.copy()
-        detail["Date"] = detail["Date"].dt.strftime("%d/%m/%Y")
+with st.expander("Voir le détail journalier avec les jours à zéro"):
+    detail_journalier = resultat.copy()
+    detail_journalier["Date"] = detail_journalier["Date"].dt.strftime("%d/%m/%Y")
 
-        st.dataframe(
-            detail[["Date", "MontantJour", "MontantCumule"]],
-            use_container_width=True
-        )
-
-    # -----------------------------
-    # Exports
-    # -----------------------------
-
-    st.subheader("Exports")
-
-    csv = resultat_final.to_csv(
-        index=False,
-        sep=";",
-        decimal=","
-    ).encode("utf-8-sig")
-
-    st.download_button(
-        label="Télécharger en CSV",
-        data=csv,
-        file_name="cumul_journalier_fec.csv",
-        mime="text/csv"
+    st.dataframe(
+        detail_journalier[["Date", "SoldeJournalier"]],
+        use_container_width=True
     )
 
-    excel = exporter_excel(resultat_final)
 
-    st.download_button(
-        label="Télécharger en Excel",
-        data=excel,
-        file_name="cumul_journalier_fec.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+# --------------------------------------------------
+# Exports
+# --------------------------------------------------
 
-else:
-    st.info("Importe un ou plusieurs fichiers FEC pour commencer.")
+st.subheader("Exports")
+
+csv = resultat_final.to_csv(
+    index=False,
+    sep=";",
+    decimal=","
+).encode("utf-8-sig")
+
+st.download_button(
+    label="Télécharger en CSV",
+    data=csv,
+    file_name="solde_journalier_fec.csv",
+    mime="text/csv"
+)
+
+excel = exporter_excel(resultat_final)
+
+st.download_button(
+    label="Télécharger en Excel",
+    data=excel,
+    file_name="solde_journalier_fec.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
