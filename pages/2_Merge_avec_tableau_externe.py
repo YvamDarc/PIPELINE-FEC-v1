@@ -16,7 +16,7 @@ from utils.file_utils import (
 )
 
 
-st.title("Merge du solde journalier FEC avec un tableau externe")
+st.title("Ajout de données externes au solde journalier")
 
 
 # --------------------------------------------------
@@ -56,11 +56,92 @@ def detecter_colonnes_dates(df):
     return colonnes_dates
 
 
+def convertir_dates_export(df):
+    df_export = df.copy()
+
+    for col in df_export.columns:
+        if pd.api.types.is_datetime64_any_dtype(df_export[col]):
+            df_export[col] = df_export[col].dt.strftime("%d/%m/%Y")
+
+    return df_export
+
+
+def preparer_cle_date(df, colonne, format_date):
+    """
+    Crée une clé de fusion date propre, normalisée à minuit.
+    """
+    df = df.copy()
+
+    df["_cle_merge"] = normaliser_date(
+        df[colonne],
+        format_date=format_date
+    ).dt.normalize()
+
+    return df
+
+
+def preparer_cle_texte(df, colonne):
+    """
+    Crée une clé de fusion texte propre.
+    """
+    df = df.copy()
+
+    df["_cle_merge"] = nettoyer_colonne_pour_merge(
+        df[colonne]
+    )
+
+    return df
+
+
+def agreger_tableau_externe(df_externe_merge, cle="_cle_merge"):
+    """
+    Agrège le tableau externe par clé de fusion.
+    Les colonnes numériques sont additionnées.
+    Les colonnes texte gardent la première valeur non vide.
+    """
+
+    df = df_externe_merge.copy()
+
+    colonnes_hors_cle = [
+        col for col in df.columns
+        if col != cle
+    ]
+
+    agg_dict = {}
+
+    for col in colonnes_hors_cle:
+        serie_num = convertir_numerique_possible(df[col])
+
+        nb_num = serie_num.notna().sum()
+        nb_total = df[col].notna().sum()
+
+        if nb_total > 0 and nb_num / nb_total >= 0.8:
+            df[col] = serie_num
+            agg_dict[col] = "sum"
+        else:
+            agg_dict[col] = "first"
+
+    df_agrege = (
+        df
+        .groupby(cle, as_index=False)
+        .agg(agg_dict)
+    )
+
+    return df_agrege
+
+
 # --------------------------------------------------
 # 1. Choix de la source principale
 # --------------------------------------------------
 
-st.header("1. Choix de la source principale")
+st.header("1. Choix du tableau principal")
+
+st.write("""
+Le tableau principal est celui que l'on veut conserver.
+
+En général, c'est le solde journalier issu de la page 1.
+Le tableau externe servira seulement à ajouter des colonnes.
+""")
 
 sources = []
 
@@ -71,24 +152,21 @@ sources.append("Importer de nouveaux FEC et recalculer un solde journalier")
 
 source_principale = st.radio(
     "Source du tableau principal",
-    sources,
-    horizontal=False
+    sources
 )
 
 
 # --------------------------------------------------
-# 2. Récupération ou calcul du solde journalier
+# 2. Récupération ou calcul du tableau principal
 # --------------------------------------------------
 
 if source_principale == "Utiliser le solde journalier généré en page 1":
 
-    st.header("2. Récupération du solde journalier")
+    df_principal = st.session_state["df_solde_journalier"].copy()
 
-    df_solde = st.session_state["df_solde_journalier"].copy()
-
-    if "Date" in df_solde.columns:
-        df_solde["Date"] = pd.to_datetime(
-            df_solde["Date"],
+    if "Date" in df_principal.columns:
+        df_principal["Date"] = pd.to_datetime(
+            df_principal["Date"],
             errors="coerce",
             dayfirst=True
         )
@@ -104,15 +182,9 @@ if source_principale == "Utiliser le solde journalier généré en page 1":
             f"{params.get('nombre_fec')} FEC."
         )
 
-    st.write("Aperçu du solde journalier récupéré :")
-    st.dataframe(
-        df_solde.head(30),
-        use_container_width=True
-    )
-
 else:
 
-    st.header("2. Import de nouveaux FEC")
+    st.subheader("Import de nouveaux FEC")
 
     uploaded_files = st.file_uploader(
         "Importer jusqu'à 6 fichiers FEC",
@@ -132,8 +204,6 @@ else:
         st.stop()
 
     st.success(f"{len(uploaded_files)} fichier(s) FEC chargé(s).")
-
-    st.subheader("Paramètres du solde journalier FEC")
 
     col1, col2, col3 = st.columns(3)
 
@@ -169,35 +239,51 @@ else:
         st.warning("Aucune écriture trouvée sur cette plage de comptes.")
         st.stop()
 
-    df_solde = resultat_fec[["Date", "SoldeJournalier"]].copy()
+    df_principal = resultat_fec[["Date", "SoldeJournalier"]].copy()
 
-    st.session_state["df_solde_journalier_page_2"] = df_solde
+    st.session_state["df_solde_journalier_page_2"] = df_principal
     st.session_state["df_fec_brut_page_2"] = df_fec
     st.session_state["df_filtre_fec_page_2"] = df_filtre
 
     st.success("Nouveau solde journalier calculé.")
 
-    st.write("Aperçu du solde journalier calculé :")
-    st.dataframe(
-        df_solde.head(30),
-        use_container_width=True
-    )
+
+st.subheader("Aperçu du tableau principal")
+
+st.write(f"Nombre de lignes du tableau principal : **{len(df_principal)}**")
+
+st.dataframe(
+    df_principal.head(50),
+    use_container_width=True
+)
 
 
 # --------------------------------------------------
 # 3. Import du tableau externe
 # --------------------------------------------------
 
-st.header("3. Import du tableau externe à fusionner")
+st.header("2. Import du tableau externe")
+
+st.write("""
+Ce tableau va servir à ajouter des colonnes au tableau principal.
+
+Exemples :
+- nombre de couverts ;
+- météo ;
+- prix ;
+- fréquentation ;
+- jours spéciaux ;
+- commentaires.
+""")
 
 fichier_externe = st.file_uploader(
-    "Importer un deuxième fichier Excel ou CSV",
+    "Importer le tableau externe Excel ou CSV",
     type=["xlsx", "xls", "csv"],
     key="fichier_externe"
 )
 
 if not fichier_externe:
-    st.info("Importe le tableau externe à fusionner avec le solde journalier.")
+    st.info("Importe le tableau externe à ajouter au tableau principal.")
     st.stop()
 
 try:
@@ -208,196 +294,283 @@ except Exception as e:
 
 st.success("Tableau externe chargé.")
 
-st.write("Aperçu du tableau externe :")
+st.write(f"Nombre de lignes du tableau externe : **{len(df_externe)}**")
+
 st.dataframe(
-    df_externe.head(30),
+    df_externe.head(50),
     use_container_width=True
 )
 
 
 # --------------------------------------------------
-# 4. Paramétrage de la fusion
+# 4. Paramétrage de la clé de fusion
 # --------------------------------------------------
 
-st.header("4. Paramétrage de la fusion")
+st.header("3. Paramétrage de la clé de fusion")
 
 st.write("""
-Choisis la colonne du tableau principal et la colonne du tableau externe à utiliser pour la fusion.
+Choisis la colonne du tableau principal et celle du tableau externe qui doivent correspondre.
 
-Dans la plupart des cas :
-- côté tableau principal : **Date**
-- côté tableau externe : une colonne date, par exemple **Date**, **Jour**, **Période**, etc.
+Dans ton cas, ce sera le plus souvent :
+- **Date** côté tableau principal ;
+- **Date**, **Jour** ou **Période** côté tableau externe.
 """)
 
-colonnes_principal = list(df_solde.columns)
+colonnes_principal = list(df_principal.columns)
 colonnes_externe = list(df_externe.columns)
 
 col_merge1, col_merge2 = st.columns(2)
 
 with col_merge1:
     colonne_principal = st.selectbox(
-        "Colonne côté tableau principal",
+        "Colonne de correspondance côté principal",
         colonnes_principal,
         index=colonnes_principal.index("Date") if "Date" in colonnes_principal else 0
     )
 
 with col_merge2:
     colonne_externe = st.selectbox(
-        "Colonne côté tableau externe",
+        "Colonne de correspondance côté externe",
         colonnes_externe
     )
+
+fusion_sur_date = st.checkbox(
+    "La clé de fusion est une date",
+    value=True
+)
+
+
+# --------------------------------------------------
+# 5. Reconnaissance des dates ou des clés texte
+# --------------------------------------------------
+
+df_principal_merge = df_principal.copy()
+df_externe_merge = df_externe.copy()
+
+if fusion_sur_date:
+
+    st.subheader("Formats de date")
+
+    formats = proposer_formats_date()
+
+    col_format1, col_format2 = st.columns(2)
+
+    with col_format1:
+        format_principal = st.selectbox(
+            "Format date côté principal",
+            formats,
+            index=0,
+            key="format_date_principal"
+        )
+
+    with col_format2:
+        format_externe = st.selectbox(
+            "Format date côté externe",
+            formats,
+            index=0,
+            key="format_date_externe"
+        )
+
+    df_principal_merge = preparer_cle_date(
+        df_principal_merge,
+        colonne=colonne_principal,
+        format_date=format_principal
+    )
+
+    df_externe_merge = preparer_cle_date(
+        df_externe_merge,
+        colonne=colonne_externe,
+        format_date=format_externe
+    )
+
+else:
+
+    df_principal_merge = preparer_cle_texte(
+        df_principal_merge,
+        colonne=colonne_principal
+    )
+
+    df_externe_merge = preparer_cle_texte(
+        df_externe_merge,
+        colonne=colonne_externe
+    )
+
+
+# --------------------------------------------------
+# 6. Contrôle des clés avant fusion
+# --------------------------------------------------
+
+st.header("4. Contrôle avant fusion")
+
+cles_principal = df_principal_merge["_cle_merge"].dropna()
+cles_externe = df_externe_merge["_cle_merge"].dropna()
+
+cles_communes = set(cles_principal) & set(cles_externe)
+cles_principal_sans_match = set(cles_principal) - set(cles_externe)
+cles_externe_sans_match = set(cles_externe) - set(cles_principal)
+
+c1, c2, c3, c4 = st.columns(4)
+
+with c1:
+    st.metric("Clés principal reconnues", len(cles_principal))
+
+with c2:
+    st.metric("Clés externe reconnues", len(cles_externe))
+
+with c3:
+    st.metric("Clés communes", len(cles_communes))
+
+with c4:
+    taux_match = 0
+
+    if len(set(cles_principal)) > 0:
+        taux_match = len(cles_communes) / len(set(cles_principal)) * 100
+
+    st.metric("Taux de match principal", f"{taux_match:.1f} %")
+
+
+with st.expander("Voir les dates / clés du principal sans correspondance externe"):
+    df_sans_match_principal = df_principal_merge[
+        df_principal_merge["_cle_merge"].isin(cles_principal_sans_match)
+    ].copy()
+
+    st.write(f"Lignes principales sans correspondance : **{len(df_sans_match_principal)}**")
+
+    st.dataframe(
+        df_sans_match_principal.head(200),
+        use_container_width=True
+    )
+
+
+with st.expander("Voir les dates / clés externes sans correspondance principale"):
+    df_sans_match_externe = df_externe_merge[
+        df_externe_merge["_cle_merge"].isin(cles_externe_sans_match)
+    ].copy()
+
+    st.write(f"Lignes externes sans correspondance : **{len(df_sans_match_externe)}**")
+
+    st.dataframe(
+        df_sans_match_externe.head(200),
+        use_container_width=True
+    )
+
+
+with st.expander("Voir les lignes externes avec date / clé non reconnue"):
+    df_externe_non_reconnue = df_externe_merge[
+        df_externe_merge["_cle_merge"].isna()
+    ].copy()
+
+    st.write(f"Lignes externes non reconnues : **{len(df_externe_non_reconnue)}**")
+
+    st.dataframe(
+        df_externe_non_reconnue.head(200),
+        use_container_width=True
+    )
+
+
+# --------------------------------------------------
+# 7. Gestion des doublons côté externe
+# --------------------------------------------------
+
+st.header("5. Gestion des doublons du tableau externe")
+
+st.write("""
+Si le tableau externe contient plusieurs lignes pour une même date,
+un merge simple peut dupliquer les lignes du tableau principal.
+
+Pour éviter cela, tu peux agréger le tableau externe par date avant fusion.
+""")
+
+nb_doublons_externe = df_externe_merge.duplicated(subset=["_cle_merge"]).sum()
+
+st.write(f"Nombre de doublons côté externe sur la clé : **{nb_doublons_externe}**")
+
+agreger_externe = st.checkbox(
+    "Agréger le tableau externe par clé avant fusion",
+    value=True,
+    help="Recommandé si tu veux garder une seule ligne par jour dans le tableau principal."
+)
+
+if agreger_externe:
+    df_externe_pour_merge = agreger_tableau_externe(
+        df_externe_merge,
+        cle="_cle_merge"
+    )
+
+    st.success("Tableau externe agrégé par clé avant fusion.")
+else:
+    df_externe_pour_merge = df_externe_merge.copy()
+
+st.write(f"Lignes externes utilisées pour la fusion : **{len(df_externe_pour_merge)}**")
+
+
+# --------------------------------------------------
+# 8. Type de fusion
+# --------------------------------------------------
+
+st.header("6. Type de fusion")
+
+st.write("""
+Par défaut, utilise **left**.
+
+C'est le bon choix quand tu veux conserver toutes les lignes du tableau principal
+et simplement ajouter des colonnes externes.
+""")
 
 type_fusion = st.selectbox(
     "Type de fusion",
     [
-        "left : conserver toutes les lignes du tableau principal",
-        "right : conserver toutes les lignes du tableau externe",
-        "inner : uniquement les lignes communes",
-        "outer : tout conserver"
-    ]
+        "left : conserver toutes les lignes du tableau principal et ajouter les colonnes externes",
+        "inner : garder uniquement les lignes qui matchent dans les deux tableaux",
+        "outer : tout conserver des deux tableaux",
+        "right : conserver toutes les lignes du tableau externe"
+    ],
+    index=0
 )
 
 mapping_type_fusion = {
-    "left : conserver toutes les lignes du tableau principal": "left",
-    "right : conserver toutes les lignes du tableau externe": "right",
-    "inner : uniquement les lignes communes": "inner",
-    "outer : tout conserver": "outer"
+    "left : conserver toutes les lignes du tableau principal et ajouter les colonnes externes": "left",
+    "inner : garder uniquement les lignes qui matchent dans les deux tableaux": "inner",
+    "outer : tout conserver des deux tableaux": "outer",
+    "right : conserver toutes les lignes du tableau externe": "right"
 }
 
 how = mapping_type_fusion[type_fusion]
 
 
-# --------------------------------------------------
-# 5. Gestion des clés de fusion
-# --------------------------------------------------
-
-st.subheader("Reconnaissance des clés de fusion")
-
-fusion_sur_date = st.checkbox(
-    "Les colonnes sélectionnées sont des dates",
-    value=True
-)
-
-df_principal_merge = df_solde.copy()
-df_externe_merge = df_externe.copy()
-
-if fusion_sur_date:
-    formats = proposer_formats_date()
-
-    col_date1, col_date2 = st.columns(2)
-
-    with col_date1:
-        format_principal = st.selectbox(
-            "Format date côté tableau principal",
-            formats,
-            index=0
-        )
-
-    with col_date2:
-        format_externe = st.selectbox(
-            "Format date côté tableau externe",
-            formats,
-            index=0
-        )
-
-    df_principal_merge["_cle_merge"] = normaliser_date(
-        df_principal_merge[colonne_principal],
-        format_date=format_principal
-    ).dt.normalize()
-
-    df_externe_merge["_cle_merge"] = normaliser_date(
-        df_externe_merge[colonne_externe],
-        format_date=format_externe
-    ).dt.normalize()
-
-else:
-    df_principal_merge["_cle_merge"] = nettoyer_colonne_pour_merge(
-        df_principal_merge[colonne_principal]
-    )
-
-    df_externe_merge["_cle_merge"] = nettoyer_colonne_pour_merge(
-        df_externe_merge[colonne_externe]
+if how == "inner":
+    st.warning(
+        "Attention : le mode inner supprime toutes les lignes du tableau principal "
+        "qui n'ont pas de correspondance exacte dans le tableau externe."
     )
 
 
 # --------------------------------------------------
-# 6. Contrôle avant fusion
+# 9. Fusion propre
 # --------------------------------------------------
 
-st.subheader("Contrôle des clés de fusion")
+st.header("7. Résultat de la fusion")
 
-cles_principal = df_principal_merge["_cle_merge"].dropna()
-cles_externe = df_externe_merge["_cle_merge"].dropna()
-
-col_controle1, col_controle2, col_controle3, col_controle4 = st.columns(4)
-
-with col_controle1:
-    st.metric(
-        "Clés principal reconnues",
-        cles_principal.shape[0]
-    )
-
-with col_controle2:
-    st.metric(
-        "Clés externe reconnues",
-        cles_externe.shape[0]
-    )
-
-with col_controle3:
-    nb_cles_communes = len(
-        set(cles_principal)
-        & set(cles_externe)
-    )
-    st.metric("Clés communes", nb_cles_communes)
-
-with col_controle4:
-    st.metric(
-        "Clés externes uniques",
-        df_externe_merge["_cle_merge"].nunique(dropna=True)
-    )
-
-
-with st.expander("Voir les clés non reconnues côté tableau externe"):
-    non_reconnues_externe = df_externe_merge[
-        df_externe_merge["_cle_merge"].isna()
-    ].copy()
-
-    st.dataframe(
-        non_reconnues_externe.head(100),
-        use_container_width=True
-    )
-
-with st.expander("Voir les clés non reconnues côté tableau principal"):
-    non_reconnues_principal = df_principal_merge[
-        df_principal_merge["_cle_merge"].isna()
-    ].copy()
-
-    st.dataframe(
-        non_reconnues_principal.head(100),
-        use_container_width=True
-    )
-
-
-# --------------------------------------------------
-# 7. Fusion
-# --------------------------------------------------
-
-st.header("5. Résultat de la fusion")
-
+# On évite de dupliquer inutilement les colonnes de clé originales si elles existent déjà.
 df_merge = df_principal_merge.merge(
-    df_externe_merge,
+    df_externe_pour_merge,
     on="_cle_merge",
     how=how,
     suffixes=("_PRINCIPAL", "_EXTERNE")
 )
 
-# On conserve une vraie colonne Date_Merge si la fusion est faite sur date
 if fusion_sur_date:
     df_merge["Date_Merge"] = df_merge["_cle_merge"]
 
 df_merge = df_merge.drop(columns=["_cle_merge"])
 
 st.write(f"Nombre de lignes après fusion : **{len(df_merge)}**")
+
+if how == "left":
+    st.caption(
+        "Mode left : toutes les lignes du tableau principal sont conservées. "
+        "Les colonnes externes sont ajoutées lorsqu'une correspondance existe."
+    )
 
 st.dataframe(
     df_merge,
@@ -406,28 +579,29 @@ st.dataframe(
 
 
 # --------------------------------------------------
-# 8. Filtre de date après fusion
+# 10. Filtre de date après fusion
 # --------------------------------------------------
 
-st.header("6. Filtre de date après fusion")
+st.header("8. Filtre de date après fusion")
 
 df_filtre_date = df_merge.copy()
 
 colonnes_dates = detecter_colonnes_dates(df_filtre_date)
 
 if "Date_Merge" in df_filtre_date.columns:
-    colonne_date_filtre_defaut = "Date_Merge"
-elif "Date" in df_filtre_date.columns:
-    colonne_date_filtre_defaut = "Date"
+    colonne_date_defaut = "Date_Merge"
+elif "Date" in df_filtre_date.columns and pd.api.types.is_datetime64_any_dtype(df_filtre_date["Date"]):
+    colonne_date_defaut = "Date"
 else:
-    colonne_date_filtre_defaut = colonnes_dates[0] if colonnes_dates else None
+    colonne_date_defaut = colonnes_dates[0] if colonnes_dates else None
 
-if colonne_date_filtre_defaut is not None:
+if colonne_date_defaut is not None:
+
     colonne_date_filtre = st.selectbox(
-        "Colonne date à utiliser pour le filtre",
+        "Colonne date à filtrer",
         colonnes_dates,
-        index=colonnes_dates.index(colonne_date_filtre_defaut)
-        if colonne_date_filtre_defaut in colonnes_dates
+        index=colonnes_dates.index(colonne_date_defaut)
+        if colonne_date_defaut in colonnes_dates
         else 0
     )
 
@@ -435,6 +609,7 @@ if colonne_date_filtre_defaut is not None:
     date_max = df_filtre_date[colonne_date_filtre].max()
 
     if pd.notna(date_min) and pd.notna(date_max):
+
         col_date_min, col_date_max = st.columns(2)
 
         with col_date_min:
@@ -462,12 +637,10 @@ if colonne_date_filtre_defaut is not None:
             f"au {date_fin.strftime('%d/%m/%Y')}"
         )
 
-    else:
-        st.info("La colonne date sélectionnée ne contient pas de dates exploitables.")
 else:
     st.info("Aucune colonne date détectée pour filtrer.")
 
-st.write(f"Nombre de lignes après filtre de date : **{len(df_filtre_date)}**")
+st.write(f"Nombre de lignes après filtre : **{len(df_filtre_date)}**")
 
 st.dataframe(
     df_filtre_date,
@@ -476,23 +649,24 @@ st.dataframe(
 
 
 # --------------------------------------------------
-# 9. Stockage pour la page 3
+# 11. Stockage pour la page 3
 # --------------------------------------------------
 
 st.session_state["df_merge"] = df_filtre_date.copy()
 
-st.success("Le tableau fusionné filtré est disponible pour la page 3 Data Engineering.")
+st.success("Le tableau fusionné est disponible pour la page 3.")
 
 
 # --------------------------------------------------
-# 10. Visualisations après fusion
+# 12. Visualisations
 # --------------------------------------------------
 
-st.header("7. Visualisations après fusion")
+st.header("9. Visualisations")
 
-colonnes_numeriques_possibles = detecter_colonnes_numeriques(df_filtre_date)
+colonnes_numeriques = detecter_colonnes_numeriques(df_filtre_date)
+colonnes_dates_graph = detecter_colonnes_dates(df_filtre_date)
 
-if colonnes_numeriques_possibles:
+if colonnes_numeriques and colonnes_dates_graph:
 
     onglet_ligne, onglet_barres, onglet_nuage = st.tabs(
         [
@@ -503,145 +677,119 @@ if colonnes_numeriques_possibles:
     )
 
     with onglet_ligne:
-        st.subheader("Courbe temporelle")
+        col_graph1, col_graph2 = st.columns(2)
 
-        colonnes_dates_graph = detecter_colonnes_dates(df_filtre_date)
-
-        if colonnes_dates_graph:
-            col_graph1, col_graph2 = st.columns(2)
-
-            with col_graph1:
-                colonne_x = st.selectbox(
-                    "Colonne date X",
-                    colonnes_dates_graph,
-                    index=colonnes_dates_graph.index("Date_Merge")
-                    if "Date_Merge" in colonnes_dates_graph
-                    else 0,
-                    key="ligne_x"
-                )
-
-            with col_graph2:
-                colonne_y = st.selectbox(
-                    "Colonne Y numérique",
-                    colonnes_numeriques_possibles,
-                    index=colonnes_numeriques_possibles.index("SoldeJournalier")
-                    if "SoldeJournalier" in colonnes_numeriques_possibles
-                    else 0,
-                    key="ligne_y"
-                )
-
-            df_graph = df_filtre_date.copy()
-            df_graph["_y_graph"] = convertir_numerique_possible(
-                df_graph[colonne_y]
+        with col_graph1:
+            colonne_x = st.selectbox(
+                "Colonne date",
+                colonnes_dates_graph,
+                index=colonnes_dates_graph.index("Date_Merge")
+                if "Date_Merge" in colonnes_dates_graph
+                else 0,
+                key="ligne_x"
             )
 
-            fig = px.line(
-                df_graph,
-                x=colonne_x,
-                y="_y_graph",
-                title=f"{colonne_y} par {colonne_x}"
+        with col_graph2:
+            colonne_y = st.selectbox(
+                "Colonne numérique",
+                colonnes_numeriques,
+                index=colonnes_numeriques.index("SoldeJournalier")
+                if "SoldeJournalier" in colonnes_numeriques
+                else 0,
+                key="ligne_y"
             )
 
-            fig.update_layout(
-                xaxis_title=colonne_x,
-                yaxis_title=colonne_y,
-                hovermode="x unified"
-            )
+        df_graph = df_filtre_date.copy()
+        df_graph["_y_graph"] = convertir_numerique_possible(df_graph[colonne_y])
 
-            fig.update_xaxes(rangeslider_visible=True)
+        fig = px.line(
+            df_graph,
+            x=colonne_x,
+            y="_y_graph",
+            title=f"{colonne_y} par date"
+        )
 
-            st.plotly_chart(
-                fig,
-                use_container_width=True
-            )
+        fig.update_layout(
+            xaxis_title=colonne_x,
+            yaxis_title=colonne_y,
+            hovermode="x unified"
+        )
 
-        else:
-            st.info("Aucune colonne date détectée pour une courbe temporelle.")
+        fig.update_xaxes(rangeslider_visible=True)
+
+        st.plotly_chart(fig, use_container_width=True)
 
     with onglet_barres:
-        st.subheader("Barres par période")
+        col_bar1, col_bar2, col_bar3 = st.columns(3)
 
-        colonnes_dates_graph = detecter_colonnes_dates(df_filtre_date)
-
-        if colonnes_dates_graph:
-            col_bar1, col_bar2, col_bar3 = st.columns(3)
-
-            with col_bar1:
-                colonne_date_bar = st.selectbox(
-                    "Colonne date",
-                    colonnes_dates_graph,
-                    index=colonnes_dates_graph.index("Date_Merge")
-                    if "Date_Merge" in colonnes_dates_graph
-                    else 0,
-                    key="bar_date"
-                )
-
-            with col_bar2:
-                colonne_valeur_bar = st.selectbox(
-                    "Valeur numérique",
-                    colonnes_numeriques_possibles,
-                    index=colonnes_numeriques_possibles.index("SoldeJournalier")
-                    if "SoldeJournalier" in colonnes_numeriques_possibles
-                    else 0,
-                    key="bar_valeur"
-                )
-
-            with col_bar3:
-                frequence = st.selectbox(
-                    "Période",
-                    ["Jour", "Mois", "Année"],
-                    index=1,
-                    key="bar_freq"
-                )
-
-            df_bar = df_filtre_date.copy()
-            df_bar["_valeur_bar"] = convertir_numerique_possible(
-                df_bar[colonne_valeur_bar]
+        with col_bar1:
+            colonne_date_bar = st.selectbox(
+                "Colonne date",
+                colonnes_dates_graph,
+                index=colonnes_dates_graph.index("Date_Merge")
+                if "Date_Merge" in colonnes_dates_graph
+                else 0,
+                key="bar_date"
             )
 
-            if frequence == "Jour":
-                df_bar["_periode"] = df_bar[colonne_date_bar].dt.strftime("%d/%m/%Y")
-            elif frequence == "Mois":
-                df_bar["_periode"] = df_bar[colonne_date_bar].dt.to_period("M").astype(str)
-            else:
-                df_bar["_periode"] = df_bar[colonne_date_bar].dt.year.astype(str)
-
-            df_bar_group = (
-                df_bar
-                .groupby("_periode", as_index=False)["_valeur_bar"]
-                .sum()
+        with col_bar2:
+            colonne_valeur_bar = st.selectbox(
+                "Valeur numérique",
+                colonnes_numeriques,
+                index=colonnes_numeriques.index("SoldeJournalier")
+                if "SoldeJournalier" in colonnes_numeriques
+                else 0,
+                key="bar_valeur"
             )
 
-            fig_bar = px.bar(
-                df_bar_group,
-                x="_periode",
-                y="_valeur_bar",
-                title=f"{colonne_valeur_bar} par {frequence.lower()}"
+        with col_bar3:
+            frequence = st.selectbox(
+                "Période",
+                ["Jour", "Mois", "Année"],
+                index=1,
+                key="bar_freq"
             )
 
-            fig_bar.update_layout(
-                xaxis_title=frequence,
-                yaxis_title=colonne_valeur_bar
-            )
+        df_bar = df_filtre_date.copy()
+        df_bar["_valeur_bar"] = convertir_numerique_possible(
+            df_bar[colonne_valeur_bar]
+        )
 
-            st.plotly_chart(
-                fig_bar,
-                use_container_width=True
-            )
-
+        if frequence == "Jour":
+            df_bar["_periode"] = df_bar[colonne_date_bar].dt.strftime("%d/%m/%Y")
+        elif frequence == "Mois":
+            df_bar["_periode"] = df_bar[colonne_date_bar].dt.to_period("M").astype(str)
         else:
-            st.info("Aucune colonne date détectée pour regrouper par période.")
+            df_bar["_periode"] = df_bar[colonne_date_bar].dt.year.astype(str)
+
+        df_bar_group = (
+            df_bar
+            .groupby("_periode", as_index=False)["_valeur_bar"]
+            .sum()
+        )
+
+        fig_bar = px.bar(
+            df_bar_group,
+            x="_periode",
+            y="_valeur_bar",
+            title=f"{colonne_valeur_bar} par {frequence.lower()}"
+        )
+
+        fig_bar.update_layout(
+            xaxis_title=frequence,
+            yaxis_title=colonne_valeur_bar
+        )
+
+        st.plotly_chart(fig_bar, use_container_width=True)
 
     with onglet_nuage:
-        st.subheader("Nuage de points")
-
-        if len(colonnes_numeriques_possibles) >= 2:
+        if len(colonnes_numeriques) >= 2:
             col_scatter1, col_scatter2 = st.columns(2)
 
             with col_scatter1:
                 colonne_x_scatter = st.selectbox(
                     "Variable X",
-                    colonnes_numeriques_possibles,
+                    colonnes_numeriques,
                     index=0,
                     key="scatter_x"
                 )
@@ -649,7 +797,7 @@ if colonnes_numeriques_possibles:
             with col_scatter2:
                 colonne_y_scatter = st.selectbox(
                     "Variable Y",
-                    colonnes_numeriques_possibles,
+                    colonnes_numeriques,
                     index=1,
                     key="scatter_y"
                 )
@@ -674,29 +822,21 @@ if colonnes_numeriques_possibles:
                 yaxis_title=colonne_y_scatter
             )
 
-            st.plotly_chart(
-                fig_scatter,
-                use_container_width=True
-            )
-
+            st.plotly_chart(fig_scatter, use_container_width=True)
         else:
-            st.info("Il faut au moins deux colonnes numériques pour générer un nuage de points.")
+            st.info("Il faut au moins deux colonnes numériques pour le nuage de points.")
 
 else:
-    st.info("Aucune colonne numérique détectée pour générer des graphiques.")
+    st.info("Il faut au moins une colonne date et une colonne numérique pour générer les graphiques.")
 
 
 # --------------------------------------------------
-# 11. Exports
+# 13. Exports
 # --------------------------------------------------
 
-st.subheader("Exports")
+st.header("10. Exports")
 
-df_export = df_filtre_date.copy()
-
-for col in df_export.columns:
-    if pd.api.types.is_datetime64_any_dtype(df_export[col]):
-        df_export[col] = df_export[col].dt.strftime("%d/%m/%Y")
+df_export = convertir_dates_export(df_filtre_date)
 
 csv = df_export.to_csv(
     index=False,
@@ -705,9 +845,9 @@ csv = df_export.to_csv(
 ).encode("utf-8-sig")
 
 st.download_button(
-    label="Télécharger le fichier fusionné filtré en CSV",
+    label="Télécharger le fichier fusionné en CSV",
     data=csv,
-    file_name="fusion_fec_tableau_externe.csv",
+    file_name="fusion_tableau_principal_externe.csv",
     mime="text/csv"
 )
 
@@ -717,8 +857,8 @@ excel = exporter_excel(
 )
 
 st.download_button(
-    label="Télécharger le fichier fusionné filtré en Excel",
+    label="Télécharger le fichier fusionné en Excel",
     data=excel,
-    file_name="fusion_fec_tableau_externe.xlsx",
+    file_name="fusion_tableau_principal_externe.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
