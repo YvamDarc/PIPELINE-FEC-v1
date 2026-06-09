@@ -13,6 +13,10 @@ from utils.fec_utils import (
 st.title("Solde journalier FEC")
 
 
+# --------------------------------------------------
+# Import des FEC
+# --------------------------------------------------
+
 uploaded_files = st.file_uploader(
     "Importer jusqu'à 6 fichiers FEC",
     type=["txt", "csv"],
@@ -32,21 +36,36 @@ except Exception as e:
 st.success(f"{len(uploaded_files)} fichier(s) FEC chargé(s).")
 
 
+# --------------------------------------------------
+# Paramètres de sélection
+# --------------------------------------------------
+
 st.subheader("Paramètres de sélection")
 
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    compte_debut = st.text_input("Compte de début", value="7000000").strip()
+    compte_debut = st.text_input(
+        "Compte de début",
+        value="7000000"
+    ).strip()
 
 with col2:
-    compte_fin = st.text_input("Compte de fin", value="70999999").strip()
+    compte_fin = st.text_input(
+        "Compte de fin",
+        value="70999999"
+    ).strip()
 
 with col3:
     sens = st.selectbox(
         "Sens du solde",
         ["Débit - Crédit", "Crédit - Débit"]
     )
+
+
+# --------------------------------------------------
+# Calcul du solde journalier
+# --------------------------------------------------
 
 resultat, df_filtre = calculer_solde_journalier(
     df=df,
@@ -61,9 +80,35 @@ if resultat is None:
 
 
 resultat_final = resultat[["Date", "SoldeJournalier"]].copy()
+
 resultat_affichage = resultat_final.copy()
 resultat_affichage["Date"] = resultat_affichage["Date"].dt.strftime("%d/%m/%Y")
 
+
+# --------------------------------------------------
+# Stockage en mémoire pour les autres pages
+# --------------------------------------------------
+# Important :
+# On stocke la version avec Date en datetime,
+# pas la version affichage avec Date en texte.
+
+st.session_state["df_fec_brut"] = df
+st.session_state["df_solde_journalier"] = resultat_final
+st.session_state["df_filtre_fec"] = df_filtre
+
+st.session_state["parametres_page_1"] = {
+    "compte_debut": compte_debut,
+    "compte_fin": compte_fin,
+    "sens": sens,
+    "nombre_fec": len(uploaded_files)
+}
+
+st.success("Le solde journalier est disponible pour les pages 2 et 3.")
+
+
+# --------------------------------------------------
+# Résultat
+# --------------------------------------------------
 
 st.subheader("Résultat")
 
@@ -73,13 +118,28 @@ with col_info1:
     st.metric("Nombre de jours générés", len(resultat_final))
 
 with col_info2:
-    st.metric("Solde total", f"{resultat_final['SoldeJournalier'].sum():,.2f}")
+    st.metric(
+        "Solde total",
+        f"{resultat_final['SoldeJournalier'].sum():,.2f}"
+    )
 
 with col_info3:
     st.metric("Nombre d'années", resultat["Annee"].nunique())
 
-st.dataframe(resultat_affichage, use_container_width=True)
+st.write(
+    f"Plage sélectionnée : **{compte_debut} à {compte_fin}** — "
+    f"Sens : **{sens}**"
+)
 
+st.dataframe(
+    resultat_affichage,
+    use_container_width=True
+)
+
+
+# --------------------------------------------------
+# Visualisation graphique
+# --------------------------------------------------
 
 st.subheader("Visualisation graphique")
 
@@ -133,20 +193,35 @@ fig.update_layout(
     hovermode="x unified"
 )
 
-fig.update_xaxes(rangeslider_visible=True)
+fig.update_xaxes(
+    rangeslider_visible=True
+)
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(
+    fig,
+    use_container_width=True
+)
 
 
 with st.expander("Voir aussi le graphique Pyplot simple"):
     fig_matplotlib, ax = plt.subplots(figsize=(14, 5))
-    ax.plot(df_graph["Date"], df_graph[y_col])
+
+    ax.plot(
+        df_graph["Date"],
+        df_graph[y_col]
+    )
+
     ax.set_title(titre)
     ax.set_xlabel("Date")
     ax.set_ylabel("Montant")
     ax.grid(True)
+
     st.pyplot(fig_matplotlib)
 
+
+# --------------------------------------------------
+# Détail des écritures
+# --------------------------------------------------
 
 with st.expander("Voir le détail des écritures prises en compte"):
     detail_ecritures = df_filtre[
@@ -165,8 +240,15 @@ with st.expander("Voir le détail des écritures prises en compte"):
         detail_ecritures["EcritureDate"].dt.strftime("%d/%m/%Y")
     )
 
-    st.dataframe(detail_ecritures, use_container_width=True)
+    st.dataframe(
+        detail_ecritures,
+        use_container_width=True
+    )
 
+
+# --------------------------------------------------
+# Exports
+# --------------------------------------------------
 
 st.subheader("Exports")
 
@@ -183,7 +265,10 @@ st.download_button(
     mime="text/csv"
 )
 
-excel = exporter_excel(resultat_affichage, sheet_name="Solde journalier")
+excel = exporter_excel(
+    resultat_affichage,
+    sheet_name="Solde journalier"
+)
 
 st.download_button(
     label="Télécharger en Excel",
